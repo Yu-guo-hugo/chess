@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chess Station</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    background: #fff;
+    color: #111;
+    font-family: "Cascadia Code", Consolas, monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  h1 { margin-bottom: 4px; }
+  .sub { color: #555; margin-top: 0; margin-bottom: 20px; }
+
+  /* ---------- Room panel ---------- */
+  #roomPanel {
+    border: 2px dotted #111;
+    padding: 16px;
+    margin-bottom: 20px;
+    width: 320px;
+  }
+  #roomPanel input {
+    width: 100%;
+    padding: 8px;
+    margin-bottom: 10px;
+    background: #fff;
+    color: #111;
+    border: 1px solid #999;
+  }
+  #roomPanel button {
+    width: 48%;
+    padding: 8px;
+    background: #eee;
+    color: #111;
+    border: 1px solid #999;
+    cursor: pointer;
+  }
+  #roomPanel button:hover { background: #ddd; }
+  #roomMsg { color: #c00; margin-top: 8px; min-height: 1.2em; }
+
+  /* ---------- Board ---------- */
+  #boardWrap { display: none; flex-direction: column; align-items: center; }
+  #roomInfo { margin-bottom: 6px; font-size: 0.95em; color: #555; }
+  #status { margin-bottom: 10px; font-size: 1.1em; }
+  #board {
+    display: grid;
+    grid-template-columns: repeat(8, 56px);
+    grid-template-rows: repeat(8, 56px);
+    border: 3px solid #111;
+  }
+  .sq {
+    width: 56px; height: 56px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 38px;
+    cursor: pointer;
+    position: relative;
+    user-select: none;
+  }
+  .light { background: #fff; color: #111; }
+  .dark  { background: #bbb; color: #111; }
+  .sq.selected { outline: 3px solid #1976D2; outline-offset: -3px; }
+  .sq.legal::after {
+    content: "";
+    position: absolute;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: rgba(25, 118, 210, 0.6);
+  }
+  .sq.legal.capture::after {
+    width: 48px; height: 48px;
+    border-radius: 50%;
+    background: transparent;
+    border: 4px solid rgba(200, 0, 0, 0.7);
+  }
+  .whitePiece { color: #fff; -webkit-text-stroke: 2px #111; paint-order: stroke fill; }
+  .blackPiece { color: #111; }
+
+  #promoModal {
+    display: none;
+    position: fixed; top:0; left:0; right:0; bottom:0;
+    background: rgba(255,255,255,0.9);
+    align-items: center; justify-content: center;
+  }
+  #promoModal .box {
+    background: #fff; border: 2px solid #111; padding: 20px;
+    display: flex; gap: 10px;
+  }
+  #promoModal button {
+    font-size: 32px; padding: 10px 14px; cursor: pointer;
+    background: #eee; color: #111; border: 1px solid #999;
+  }
+
+  #leaveBtn {
+    margin-top: 16px; padding: 6px 14px;
+    background: #eee; color: #111; border: 1px solid #999; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<h1>Chess Station</h1>
+<p class="sub">Create or join a room to play chess online (full rule enforcement included)</p>
+
+<!-- ============ Room panel ============ -->
+<div id="roomPanel">
+  <input id="playerName" placeholder="Your nickname">
+  <input id="roomId" placeholder="Room ID">
+  <input id="roomPwd" type="password" placeholder="Password">
+  <button id="createBtn">Create Room</button>
+  <button id="joinBtn">Join Room</button>
+  <div id="roomMsg"></div>
+</div>
+
+<!-- ============ Board panel ============ -->
+<div id="boardWrap">
+  <div id="roomInfo"></div>
+  <div id="status">Waiting for opponent...</div>
+  <div id="board"></div>
+  <button id="leaveBtn">Leave Room</button>
+</div>
+
+<div id="promoModal">
+  <div class="box" id="promoButtons"></div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script>
+/* =========================================================
+   1. Firebase init — replace with your own project config
+   (same steps as the telegraph station project)
+   ========================================================= */
+const firebaseConfig = {
+  apiKey: "AIzaSyAAhcjoruJp9isxTaM3fr4PO4QQKoIpy10",
+  authDomain: "telegraph-chat-833dc.firebaseapp.com",
+  databaseURL: "https://telegraph-chat-833dc-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "telegraph-chat-833dc",
+  storageBucket: "telegraph-chat-833dc.firebasestorage.app",
+  messagingSenderId: "622143337600",
+  appId: "1:622143337600:web:328e2b6750289c50b7a265"
+};
+
+// Initialize Firebase (compat SDK — matches the <script> tags loaded above)
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+/* =========================================================
+   2. Board data model
+   board is a flat array of length 64, index = row*8+col
+   row 0 = rank 8 (black back rank), row 7 = rank 1 (white back rank)
+   col 0 = file a ... col 7 = file h
+   each cell: null, or a string like "wP","bK" (color+type)
+   ========================================================= */
+function initialBoard() {
+  const b = new Array(64).fill(null);
+  const backRank = ["R","N","B","Q","K","B","N","R"];
+  for (let c = 0; c < 8; c++) {
+    b[0*8+c] = "b" + backRank[c];
+    b[1*8+c] = "bP";
+    b[6*8+c] = "wP";
+    b[7*8+c] = "w" + backRank[c];
+  }
+  return b;
+}
+
+function idx(r,c){ return r*8+c; }
+function inside(r,c){ return r>=0 && r<8 && c>=0 && c<8; }
+function pieceColor(p){ return p ? p[0] : null; }
+function pieceType(p){ return p ? p[1] : null; }
+function opponent(color){ return color === "w" ? "b" : "w"; }
+
+/* Full game state */
+let state = {
+  board: initialBoard(),
+  turn: "w",
+  castling: { wK:true, wQ:true, bK:true, bQ:true }, // castling rights
+  enPassant: null,   // target square index capturable en passant, or null
+  myColor: null,     // "w" / "b" — the color assigned to me in this room
+  roomId: null,
+  myName: "",
+  whiteName: "",
+  blackName: "",
+};
+
+/* =========================================================
+   3. Move generation (pseudo-legal: doesn't check own king safety)
+   ========================================================= */
+function slideMoves(board, r, c, dirs, color) {
+  const moves = [];
+  for (const [dr,dc] of dirs) {
+    let nr = r+dr, nc = c+dc;
+    while (inside(nr,nc)) {
+      const target = board[idx(nr,nc)];
+      if (!target) {
+        moves.push({to: idx(nr,nc)});
+      } else {
+        if (pieceColor(target) !== color) moves.push({to: idx(nr,nc), capture:true});
+        break;
+      }
+      nr += dr; nc += dc;
+    }
+  }
+  return moves;
+}
+
+function pseudoMoves(state, r, c) {
+  const board = state.board;
+  const p = board[idx(r,c)];
+  if (!p) return [];
+  const color = pieceColor(p), type = pieceType(p);
+  const moves = [];
+
+  if (type === "N") {
+    const deltas = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+    for (const [dr,dc] of deltas) {
+      const nr=r+dr, nc=c+dc;
+      if (!inside(nr,nc)) continue;
+      const target = board[idx(nr,nc)];
+      if (!target) moves.push({to:idx(nr,nc)});
+      else if (pieceColor(target)!==color) moves.push({to:idx(nr,nc), capture:true});
+    }
+  } else if (type === "B") {
+    moves.push(...slideMoves(board,r,c,[[-1,-1],[-1,1],[1,-1],[1,1]],color));
+  } else if (type === "R") {
+    moves.push(...slideMoves(board,r,c,[[-1,0],[1,0],[0,-1],[0,1]],color));
+  } else if (type === "Q") {
+    moves.push(...slideMoves(board,r,c,[[-1,-1],[-1,1],[1,-1],[1,1],[-1,0],[1,0],[0,-1],[0,1]],color));
+  } else if (type === "K") {
+    const deltas = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+    for (const [dr,dc] of deltas) {
+      const nr=r+dr, nc=c+dc;
+      if (!inside(nr,nc)) continue;
+      const target = board[idx(nr,nc)];
+      if (!target) moves.push({to:idx(nr,nc)});
+      else if (pieceColor(target)!==color) moves.push({to:idx(nr,nc), capture:true});
+    }
+    // Castling
+    const rank = color === "w" ? 7 : 0;
+    if (r === rank && c === 4) {
+      const rights = state.castling;
+      const kSideRight = color==="w" ? rights.wK : rights.bK;
+      const qSideRight = color==="w" ? rights.wQ : rights.bQ;
+      if (kSideRight && !board[idx(rank,5)] && !board[idx(rank,6)] &&
+          board[idx(rank,7)] === color+"R") {
+        if (!isSquareAttacked(board, rank,4, opponent(color)) &&
+            !isSquareAttacked(board, rank,5, opponent(color)) &&
+            !isSquareAttacked(board, rank,6, opponent(color))) {
+          moves.push({to: idx(rank,6), castle:"K"});
+        }
+      }
+      if (qSideRight && !board[idx(rank,1)] && !board[idx(rank,2)] && !board[idx(rank,3)] &&
+          board[idx(rank,0)] === color+"R") {
+        if (!isSquareAttacked(board, rank,4, opponent(color)) &&
+            !isSquareAttacked(board, rank,3, opponent(color)) &&
+            !isSquareAttacked(board, rank,2, opponent(color))) {
+          moves.push({to: idx(rank,2), castle:"Q"});
+        }
+      }
+    }
+  } else if (type === "P") {
+    const dir = color === "w" ? -1 : 1;
+    const startRow = color === "w" ? 6 : 1;
+    const promoRow = color === "w" ? 0 : 7;
+    // one step forward
+    if (inside(r+dir,c) && !board[idx(r+dir,c)]) {
+      moves.push({to: idx(r+dir,c), promo: (r+dir===promoRow)});
+      // two steps forward
+      if (r === startRow && !board[idx(r+2*dir,c)]) {
+        moves.push({to: idx(r+2*dir,c), doubleStep:true});
+      }
+    }
+    // diagonal captures
+    for (const dc of [-1,1]) {
+      const nr=r+dir, nc=c+dc;
+      if (!inside(nr,nc)) continue;
+      const target = board[idx(nr,nc)];
+      if (target && pieceColor(target)!==color) {
+        moves.push({to:idx(nr,nc), capture:true, promo:(nr===promoRow)});
+      } else if (idx(nr,nc) === state.enPassant) {
+        moves.push({to:idx(nr,nc), capture:true, enPassantCapture:true});
+      }
+    }
+  }
+  return moves;
+}
+
+/* Whether a square is attacked by a given color (used for check + castling safety) */
+function isSquareAttacked(board, r, c, byColor) {
+  for (let i=0;i<64;i++) {
+    const p = board[i];
+    if (!p || pieceColor(p)!==byColor) continue;
+    const pr = Math.floor(i/8), pc = i%8;
+    const type = pieceType(p);
+    if (type === "P") {
+      const dir = byColor === "w" ? -1 : 1;
+      if ((pr+dir===r) && (pc-1===c || pc+1===c)) return true;
+    } else if (type === "N") {
+      const deltas = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+      for (const [dr,dc] of deltas) if (pr+dr===r && pc+dc===c) return true;
+    } else if (type === "K") {
+      if (Math.abs(pr-r)<=1 && Math.abs(pc-c)<=1 && !(pr===r&&pc===c)) return true;
+    } else if (type === "B" || type === "R" || type === "Q") {
+      const dirs = type==="B" ? [[-1,-1],[-1,1],[1,-1],[1,1]]
+                 : type==="R" ? [[-1,0],[1,0],[0,-1],[0,1]]
+                 : [[-1,-1],[-1,1],[1,-1],[1,1],[-1,0],[1,0],[0,-1],[0,1]];
+      for (const [dr,dc] of dirs) {
+        let nr=pr+dr, nc=pc+dc;
+        while (inside(nr,nc)) {
+          if (nr===r && nc===c) return true;
+          if (board[idx(nr,nc)]) break;
+          nr+=dr; nc+=dc;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function findKing(board, color) {
+  for (let i=0;i<64;i++) if (board[i] === color+"K") return i;
+  return -1;
+}
+
+function isInCheck(board, color) {
+  const kIdx = findKing(board, color);
+  const r = Math.floor(kIdx/8), c = kIdx%8;
+  return isSquareAttacked(board, r, c, opponent(color));
+}
+
+/* Simulate a move without mutating the original board */
+function simulateMove(st, from, move) {
+  const board = st.board.slice();
+  const p = board[from];
+  const color = pieceColor(p);
+  board[from] = null;
+
+  if (move.enPassantCapture) {
+    const capturedRow = color === "w" ? Math.floor(move.to/8)+1 : Math.floor(move.to/8)-1;
+    board[idx(capturedRow, move.to%8)] = null;
+  }
+  board[move.to] = move.promo ? color + (move.promoChoice || "Q") : p;
+
+  if (move.castle === "K") {
+    const rank = color==="w"?7:0;
+    board[idx(rank,5)] = board[idx(rank,7)];
+    board[idx(rank,7)] = null;
+  } else if (move.castle === "Q") {
+    const rank = color==="w"?7:0;
+    board[idx(rank,3)] = board[idx(rank,0)];
+    board[idx(rank,0)] = null;
+  }
+  return board;
+}
+
+/* Legal moves = pseudo-legal moves that don't leave own king in check */
+function legalMoves(st, from) {
+  const r = Math.floor(from/8), c = from%8;
+  const p = st.board[from];
+  if (!p) return [];
+  const color = pieceColor(p);
+  const pseudo = pseudoMoves(st, r, c);
+  return pseudo.filter(m => {
+    const testBoard = simulateMove(st, from, m);
+    return !isInCheck(testBoard, color);
+  });
+}
+
+function allLegalMoves(st, color) {
+  const all = [];
+  for (let i=0;i<64;i++) {
+    const p = st.board[i];
+    if (p && pieceColor(p)===color) {
+      for (const m of legalMoves(st, i)) all.push({from:i, ...m});
+    }
+  }
+  return all;
+}
+
+/* =========================================================
+   4. Apply a move to the real state (castling rights, en passant target)
+   ========================================================= */
+function applyMove(st, from, move) {
+  const p = st.board[from];
+  const color = pieceColor(p), type = pieceType(p);
+
+  st.board = simulateMove(st, from, move);
+
+  if (type === "K") {
+    if (color==="w") { st.castling.wK=false; st.castling.wQ=false; }
+    else { st.castling.bK=false; st.castling.bQ=false; }
+  }
+  if (type === "R") {
+    const r = Math.floor(from/8), c = from%8;
+    if (color==="w" && r===7 && c===0) st.castling.wQ=false;
+    if (color==="w" && r===7 && c===7) st.castling.wK=false;
+    if (color==="b" && r===0 && c===0) st.castling.bQ=false;
+    if (color==="b" && r===0 && c===7) st.castling.bK=false;
+  }
+  if (move.to === idx(7,0)) st.castling.wQ=false;
+  if (move.to === idx(7,7)) st.castling.wK=false;
+  if (move.to === idx(0,0)) st.castling.bQ=false;
+  if (move.to === idx(0,7)) st.castling.bK=false;
+
+  st.enPassant = move.doubleStep ? (from + move.to)/2 : null;
+
+  st.turn = opponent(color);
+}
+
+/* =========================================================
+   5. UI rendering
+   ========================================================= */
+const symbols = {
+  wK:"♚",wQ:"♛",wR:"♜",wB:"♝",wN:"♞",wP:"♟",
+  bK:"♚",bQ:"♛",bR:"♜",bB:"♝",bN:"♞",bP:"♟",
+};
+
+let selected = null;
+let currentLegal = [];
+
+function renderBoard() {
+  const boardEl = document.getElementById("board");
+  boardEl.innerHTML = "";
+  for (let r=0;r<8;r++) {
+    for (let c=0;c<8;c++) {
+      const i = idx(r,c);
+      const sq = document.createElement("div");
+      sq.className = "sq " + ((r+c)%2===0 ? "light":"dark");
+      const p = state.board[i];
+      if (p) {
+        sq.textContent = symbols[p];
+        sq.classList.add(pieceColor(p)==="w" ? "whitePiece":"blackPiece");
+      }
+      if (selected === i) sq.classList.add("selected");
+      const legalHit = currentLegal.find(m=>m.to===i);
+      if (legalHit) {
+        sq.classList.add("legal");
+        if (legalHit.capture) sq.classList.add("capture");
+      }
+      sq.dataset.idx = i;
+      sq.addEventListener("click", onSquareClick);
+      boardEl.appendChild(sq);
+    }
+  }
+  updateStatus();
+}
+
+function updateRoomInfo() {
+  const el = document.getElementById("roomInfo");
+  const w = state.whiteName || "(waiting)";
+  const b = state.blackName || "(waiting)";
+  el.textContent = `Room: ${state.roomId}  —  White: ${w}  |  Black: ${b}`;
+}
+
+function updateStatus() {
+  updateRoomInfo();
+  const statusEl = document.getElementById("status");
+  const turnColor = state.turn === "w" ? "White" : "Black";
+  const check = isInCheck(state.board, state.turn);
+  const moves = allLegalMoves(state, state.turn);
+  if (moves.length === 0) {
+    statusEl.textContent = check
+      ? `Checkmate! ${state.turn==="w"?"Black":"White"} wins`
+      : "Stalemate — draw";
+  } else {
+    statusEl.textContent = `${turnColor} to move` + (check ? " (Check!)" : "")
+      + (state.myColor ? ` — you are ${state.myColor==="w"?"White":"Black"}` : "");
+  }
+}
+
+function onSquareClick(e) {
+  const i = parseInt(e.currentTarget.dataset.idx);
+  const p = state.board[i];
+
+  if (selected === null) {
+    if (!p) return;
+    if (state.turn !== state.myColor) return;
+    if (pieceColor(p) !== state.myColor) return;
+    selected = i;
+    currentLegal = legalMoves(state, i);
+    renderBoard();
+    return;
+  }
+
+  const move = currentLegal.find(m => m.to === i);
+  if (move) {
+    if (move.promo) {
+      showPromoModal(choice => {
+        move.promoChoice = choice;
+        doMove(selected, move);
+      });
+    } else {
+      doMove(selected, move);
+    }
+    return;
+  }
+
+  if (p && pieceColor(p) === state.myColor) {
+    selected = i;
+    currentLegal = legalMoves(state, i);
+    renderBoard();
+    return;
+  }
+
+  selected = null;
+  currentLegal = [];
+  renderBoard();
+}
+
+function showPromoModal(callback) {
+  const modal = document.getElementById("promoModal");
+  const box = document.getElementById("promoButtons");
+  box.innerHTML = "";
+  const color = state.myColor;
+  for (const t of ["Q","R","B","N"]) {
+    const btn = document.createElement("button");
+    btn.textContent = symbols[color+t];
+    btn.onclick = () => { modal.style.display="none"; callback(t); };
+    box.appendChild(btn);
+  }
+  modal.style.display = "flex";
+}
+
+function doMove(from, move) {
+  applyMove(state, from, move);
+  selected = null;
+  currentLegal = [];
+  renderBoard();
+  syncStateToFirebase();
+}
+
+/* =========================================================
+   6. Firebase room logic
+   rooms/{roomId} = {
+     password, board:[64], turn, castling:{...}, enPassant,
+     playerCount, white: bool, black: bool
+   }
+   ========================================================= */
+function serializeState() {
+  return {
+    // 用字符串存棋盘，避免 Firebase 把带大量 null 的数组误判成普通对象
+    boardStr: state.board.map(x => x || "").join(","),
+    turn: state.turn,
+    castling: state.castling,
+    enPassant: state.enPassant,
+  };
+}
+
+function syncStateToFirebase() {
+  if (!state.roomId) return;
+  db.ref("rooms/"+state.roomId).update(serializeState());
+}
+
+function listenRoom(roomId) {
+  db.ref("rooms/"+roomId).on("value", snap => {
+    const data = snap.val();
+    if (!data) return;
+    state.board = data.boardStr.split(",").map(x => x === "" ? null : x);
+    state.turn = data.turn;
+    state.castling = data.castling;
+    state.enPassant = data.enPassant;
+    state.whiteName = data.whiteName || "";
+    state.blackName = data.blackName || "";
+    selected = null;
+    currentLegal = [];
+    renderBoard();
+  });
+}
+
+document.getElementById("createBtn").onclick = async () => {
+  const name = document.getElementById("playerName").value.trim();
+  const roomId = document.getElementById("roomId").value.trim();
+  const pwd = document.getElementById("roomPwd").value;
+  const msg = document.getElementById("roomMsg");
+  if (!name || !roomId || !pwd) { msg.textContent = "Nickname, room ID and password are all required"; return; }
+
+  const ref = db.ref("rooms/"+roomId);
+  // 用事务保证"检查房间是否存在 + 写入"是一个不可打断的原子操作，
+  // 避免两个人几乎同时创建同一个房间号时，两边都误以为自己是白方。
+  const result = await ref.transaction(current => {
+    if (current !== null) return; // 房间已存在，中止事务（不覆盖）
+    return { ...serializeStateFresh(), password: pwd, playerCount: 1, whiteName: name, blackName: "" };
+  });
+  if (!result.committed) { msg.textContent = "Room ID already exists, pick another"; return; }
+
+  state.myColor = "w";
+  state.roomId = roomId;
+  state.myName = name;
+  ref.onDisconnect().remove(); // 断线（关标签页/断网）时自动清理房间
+  enterBoard(roomId);
+};
+
+document.getElementById("joinBtn").onclick = async () => {
+  const name = document.getElementById("playerName").value.trim();
+  const roomId = document.getElementById("roomId").value.trim();
+  const pwd = document.getElementById("roomPwd").value;
+  const msg = document.getElementById("roomMsg");
+  if (!name || !roomId || !pwd) { msg.textContent = "Nickname, room ID and password are all required"; return; }
+
+  const ref = db.ref("rooms/"+roomId);
+  const snap = await ref.get();
+  if (!snap.exists()) { msg.textContent = "Room does not exist"; return; }
+  const data = snap.val();
+  if (data.password !== pwd) { msg.textContent = "Incorrect password"; return; }
+  if (data.playerCount >= 2) { msg.textContent = "Room is full (max 2 players)"; return; }
+
+  await ref.update({ playerCount: 2, blackName: name });
+
+  state.myColor = "b";
+  state.roomId = roomId;
+  state.myName = name;
+  ref.onDisconnect().remove(); // 断线时自动清理房间
+  enterBoard(roomId);
+};
+
+document.getElementById("leaveBtn").onclick = async () => {
+  if (state.roomId) {
+    const ref = db.ref("rooms/"+state.roomId);
+    ref.off();
+    await ref.onDisconnect().cancel();
+    // 一方离开就把房间数据整个清掉，避免 playerCount 卡住导致后来者误以为房间已满
+    await ref.remove();
+  }
+  state.roomId = null;
+  state.myColor = null;
+  state.whiteName = "";
+  state.blackName = "";
+  document.getElementById("boardWrap").style.display = "none";
+  document.getElementById("roomPanel").style.display = "block";
+};
+
+function serializeStateFresh() {
+  return {
+    boardStr: initialBoard().map(x => x || "").join(","),
+    turn: "w",
+    castling: { wK:true, wQ:true, bK:true, bQ:true },
+    enPassant: null,
+  };
+}
+
+function enterBoard(roomId) {
+  document.getElementById("roomPanel").style.display = "none";
+  document.getElementById("boardWrap").style.display = "flex";
+  listenRoom(roomId);
+}
+</script>
+</body>
+</html>
