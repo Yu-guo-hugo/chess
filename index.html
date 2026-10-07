@@ -426,8 +426,13 @@ let currentLegal = [];
 function renderBoard() {
   const boardEl = document.getElementById("board");
   boardEl.innerHTML = "";
-  for (let r=0;r<8;r++) {
-    for (let c=0;c<8;c++) {
+  // 棋盘按自己执子的一方翻转显示，让自己的棋子始终在下方，
+  // 不用再靠文字告诉对方"你是哪一方"
+  const flip = state.myColor === "b";
+  for (let visR=0; visR<8; visR++) {
+    for (let visC=0; visC<8; visC++) {
+      const r = flip ? 7-visR : visR;
+      const c = flip ? 7-visC : visC;
       const i = idx(r,c);
       const sq = document.createElement("div");
       sq.className = "sq " + ((r+c)%2===0 ? "light":"dark");
@@ -468,8 +473,7 @@ function updateStatus() {
       ? `Checkmate! ${state.turn==="w"?"Black":"White"} wins`
       : "Stalemate — draw";
   } else {
-    statusEl.textContent = `${turnColor} to move` + (check ? " (Check!)" : "")
-      + (state.myColor ? ` — you are ${state.myColor==="w"?"White":"Black"}` : "");
+    statusEl.textContent = `${turnColor} to move` + (check ? " (Check!)" : "");
   }
 }
 
